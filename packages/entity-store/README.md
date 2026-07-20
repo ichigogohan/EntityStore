@@ -7,14 +7,6 @@
 
 ---
 
-## Installation
-
-```bash
-npm install entity-store
-```
-
----
-
 ## Initialization
 
 `EntityStore` は、非同期ファクトリーメソッド `EntityStore.create()` を使用して生成します。
