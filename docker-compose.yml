@@ -1,5 +1,5 @@
 services:
-  api:
+  profile:
     build:
       context: ./services/profile-server
     env_file:
