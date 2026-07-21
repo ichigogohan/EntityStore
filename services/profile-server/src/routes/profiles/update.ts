@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { profileRepository } from "../../repositories/profile.repository.js";
 import { UpdateProfileRequest, ProfileParams } from "../../types/profile.js";
+import { validateProfileFields } from "../../validators/profile.js";
 
 export async function updateProfileRoute(
     app: FastifyInstance
@@ -11,6 +12,18 @@ export async function updateProfileRoute(
     }>("/profiles/:id", async (request, reply) => {
         const { id } = request.params;
         const body = request.body;
+
+        const validationError = validateProfileFields({
+                name: body.name,
+                bio: body.bio,
+                iconUrl: body.iconUrl,
+            });
+
+        if (validationError) {
+            return reply.code(400).send({
+                message: validationError,
+            });
+        }
 
         const profile = await profileRepository.findById(id);
 

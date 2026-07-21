@@ -54,3 +54,9 @@ export interface ProfileUpdateData {
     iconUrl?: string | null;
     metadata?: Prisma.InputJsonValue;
 }
+
+export const PROFILE_LIMITS = {
+    NAME_MAX_LENGTH: 64,
+    BIO_MAX_LENGTH: 512,
+    ICON_URL_MAX_LENGTH: 512,
+} as const;
