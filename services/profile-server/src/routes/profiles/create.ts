@@ -8,6 +8,13 @@ export async function createProfileRoute(
     app.post<{
         Body: CreateProfileRequest;
     }>("/profiles", async (request, reply) => {
+        if (process.env.ENABLE_PROFILE_CREATE !== "true") {
+            return reply.code(403).send({
+                message:
+                    "Profile creation is disabled."
+            });
+        }
+
         const body = request.body;
 
         const existing = await profileRepository.findById(body.id);
