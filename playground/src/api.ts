@@ -1,9 +1,9 @@
 import type { EntityProfile } from "./app";
-
+ 
 import { EntityStore } from "../../packages/entity-store/dist/index.js";
-
+ 
 export const PROFILE_API_URL: string = import.meta.env.VITE_API_URL;
-
+ 
 // アイコンアップロード用サーバー(プロフィールAPIとは別サーバー)
 export const IMG_API_URL: string = import.meta.env.VITE_IMG_API_URL;
 
@@ -29,6 +29,7 @@ export type PatchProfileResult =
     | { status: "conflict"; currentVersion?: number }
     | { status: "deleted" }
     | { status: "not_found" }
+    | { status: "invalid"; message: string }
     | { status: "error"; message: string };
 
 export async function patchProfile(
@@ -41,6 +42,11 @@ export async function patchProfile(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
+
+        if (response.status === 400) {
+            const body = await response.json().catch(() => null);
+            return { status: "invalid", message: body?.message ?? "入力内容が不正です" };
+        }
 
         if (response.status === 409) {
             const conflict = await response.json().catch(() => null);
@@ -78,8 +84,44 @@ export function describePatchError(result: Exclude<PatchProfileResult, { status:
             return "このプロフィールは削除されています";
         case "not_found":
             return "プロフィールが見つかりません";
+        case "invalid":
+            return result.message;
         case "error":
             return `保存に失敗しました: ${result.message}`;
+    }
+}
+
+/* -------------------------------------------------------------------- */
+/* DELETE /profiles/:id                                                 */
+/* -------------------------------------------------------------------- */
+
+export type DeleteProfileResult =
+    | { status: "ok" }
+    | { status: "not_found" }
+    | { status: "error"; message: string };
+
+export async function deleteProfile(id: string): Promise<DeleteProfileResult> {
+    try {
+        const response = await fetch(`${PROFILE_API_URL}/profiles/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+        });
+
+        if (response.status === 404) {
+            return { status: "not_found" };
+        }
+
+        // 200: 削除後のプロフィールを返す
+        // 204: 既に削除済みだった場合(冪等、ボディなし)
+        if (response.status === 200 || response.status === 204) {
+            return { status: "ok" };
+        }
+
+        return { status: "error", message: `HTTP ${response.status}` };
+    } catch (error) {
+        return {
+            status: "error",
+            message: error instanceof Error ? error.message : String(error),
+        };
     }
 }
 

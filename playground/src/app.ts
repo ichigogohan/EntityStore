@@ -9,7 +9,7 @@ export interface EntityProfile {
     id: string;
     name: string;
     bio?: string | null;
-    iconUrl: string;
+    iconUrl?: string | null;
     version: number;
     status: "active" | "deleted" | "unknown";
     metadata?: unknown;
@@ -198,6 +198,16 @@ export function renderProfileView(profile: EntityProfile | null, loading: boolea
                 >
                     保存
                 </button>
+
+                <button
+                    id="delete-btn"
+                    type="button"
+                    ${isDeleted ? "disabled" : ""}
+                    class="rounded-md border border-rose-900 px-4 py-2 text-sm font-medium text-rose-300 transition-colors hover:bg-rose-950/50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                    削除
+                </button>
+
                 <span id="save-message" class="font-mono text-xs"></span>
             </div>
         </form>
@@ -231,7 +241,7 @@ function renderBackButton(): string {
 
 // iconUrl が空文字の場合(未解決状態)は public/Unknown.webp を参照する。
 function renderAvatar(profile: EntityProfile, sizeClasses: string): string {
-    const src = profile.iconUrl || "/unknown.webp";
+    const src = profile.iconUrl || "/Unknown.webp";
 
     return `
         <img

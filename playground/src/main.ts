@@ -3,7 +3,7 @@ import "./style.css";
 import { renderShell, renderListView, renderProfileView } from "./app";
 import type { EntityProfile } from "./app";
 
-import { store, patchProfile, describePatchError, uploadIcon, buildIconUrl } from "./api";
+import { store, patchProfile, describePatchError, deleteProfile, uploadIcon, buildIconUrl } from "./api";
 
 const root = document.querySelector<HTMLDivElement>("#app")!;
 root.innerHTML = renderShell();
@@ -16,7 +16,7 @@ const view = document.querySelector<HTMLElement>("#view")!;
 
 // デモ環境用ID: u0000 〜 u0049
 const DEMO_IDS: string[] = Array.from(
-    { length: 51 },
+    { length: 50 },
     (_, i) => `u${String(i).padStart(4, "0")}`
 );
 
@@ -41,6 +41,8 @@ function mountList() {
         requestAnimationFrame(() => {
             rerenderScheduled = false;
 
+            // profiles は下の forEach で全IDに対し store.get(id) の返り値を
+            // set 済みのため、この時点で undefined になることはない。
             const ordered = DEMO_IDS.map((id) => profiles.get(id)!);
 
             view.innerHTML = renderListView(ordered);
@@ -114,6 +116,7 @@ function renderProfile(profile: EntityProfile) {
     view.innerHTML = renderProfileView(profile, false);
     attachBackHandler();
     attachProfileFormHandler(profile);
+    attachDeleteHandler(profile);
     attachIconUploadHandler(profile);
 }
 
@@ -152,6 +155,46 @@ function attachProfileFormHandler(profile: EntityProfile) {
 
         setMessage(message, describePatchError(result), "text-rose-400");
         if (submitBtn) submitBtn.disabled = false;
+    });
+}
+
+function attachDeleteHandler(profile: EntityProfile) {
+    const deleteBtn = document.querySelector<HTMLButtonElement>("#delete-btn");
+    const message = document.querySelector<HTMLSpanElement>("#save-message");
+
+    deleteBtn?.addEventListener("click", async () => {
+        const confirmed = confirm(
+            `「${profile.name || profile.id}」を削除しますか?この操作は取り消せません。`
+        );
+        if (!confirmed) return;
+
+        deleteBtn.disabled = true;
+        setMessage(message, "削除中...", "text-zinc-500");
+
+        const result = await deleteProfile(profile.id);
+
+        if (result.status !== "ok") {
+            setMessage(
+                message,
+                result.status === "not_found"
+                    ? "プロフィールが見つかりません"
+                    : `削除に失敗しました: ${result.message}`,
+                "text-rose-400"
+            );
+            deleteBtn.disabled = false;
+            return;
+        }
+
+        // 削除後の最終状態(status: "deleted"含む)をサーバーから取り直して
+        // その場に反映する(一覧へは戻さない)。
+        await store.resolve([profile.id]);
+        const refreshed = await store.getLatest(profile.id);
+        renderProfile(refreshed);
+        setMessage(
+            document.querySelector<HTMLSpanElement>("#save-message"),
+            "削除しました",
+            "text-emerald-400"
+        );
     });
 }
 
