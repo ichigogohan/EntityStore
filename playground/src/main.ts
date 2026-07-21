@@ -1,86 +1,180 @@
 import "./style.css";
 
-import { renderShell, renderListView, renderProfileView } from "./app";
+import {
+    renderShell,
+    renderListShell,
+    renderListRow,
+    renderTimelineShell,
+    renderTimelineCard,
+    renderProfileView,
+    TOTAL_ENTITY_COUNT,
+} from "./app";
 import type { EntityProfile } from "./app";
 
 import { store, patchProfile, describePatchError, deleteProfile, uploadIcon, buildIconUrl } from "./api";
+import { createFeed, type Feed } from "./feed";
+import { getStats, resetStats, subscribeStats } from "./stats";
+
+const FEED_WINDOW_SIZE = 200;
+const LIST_BATCH_SIZE = 50;
+const TIMELINE_BATCH_SIZE = 20;
+
+// タイムラインの「よく見られるID」プール。ここに偏らせることで、
+// 同じIDへの再アクセス(=キャッシュヒット)が実際に発生するようにする。
+// 完全一様ランダムだと同じIDが再出現する確率はほぼゼロで、
+// ヒット率を見せるデモとして意味を持たない。
+const HOT_POOL_SIZE = 200;
+const HOT_POOL_RATIO = 0.8; // 8割はホットプールから、2割は完全ランダム
 
 const root = document.querySelector<HTMLDivElement>("#app")!;
 root.innerHTML = renderShell();
 
 const view = document.querySelector<HTMLElement>("#view")!;
 
+mountStatsPanel();
+
+let activeFeed: Feed | null = null;
+
+function teardownActiveFeed() {
+    activeFeed?.destroy();
+    activeFeed = null;
+}
+
+/* -------------------------------------------------------------------- */
+/* 統計パネル(画面遷移をまたいで常設)                                      */
+/* -------------------------------------------------------------------- */
+
+function mountStatsPanel() {
+    const requestedEl = document.querySelector<HTMLElement>("#stats-requested")!;
+    const sentEl = document.querySelector<HTMLElement>("#stats-sent")!;
+    const unchangedEl = document.querySelector<HTMLElement>("#stats-unchanged")!;
+    const cacheHitRateEl = document.querySelector<HTMLElement>("#stats-cache-hit-rate")!;
+    const networkEl = document.querySelector<HTMLElement>("#stats-network")!;
+
+    const update = () => {
+        const { requestedCount, networkRequestCount, sentIdCount, unchangedIdCount } = getStats();
+
+        requestedEl.textContent = String(requestedCount);
+        sentEl.textContent = String(sentIdCount);
+        unchangedEl.textContent = String(unchangedIdCount);
+        networkEl.textContent = String(networkRequestCount);
+
+        // サーバーへ送った延べID数のうち、バージョン一致で本文が返らず
+        // キャッシュがそのまま使い回された割合。
+        cacheHitRateEl.textContent =
+            sentIdCount === 0 ? "—" : `${Math.round((unchangedIdCount / sentIdCount) * 100)}%`;
+    };
+
+    subscribeStats(update);
+    document.querySelector<HTMLButtonElement>("#stats-reset-btn")?.addEventListener("click", resetStats);
+
+    update();
+}
+
 /* -------------------------------------------------------------------- */
 /* 画面1: ユーザー一覧                                                    */
 /* -------------------------------------------------------------------- */
 
-// デモ環境用ID: u0000 〜 u0049
-const DEMO_IDS: string[] = Array.from(
-    { length: 50 },
-    (_, i) => `u${String(i).padStart(4, "0")}`
-);
-
-let listUnsubscribes: Array<() => void> = [];
-
-function teardownList() {
-    listUnsubscribes.forEach((unsubscribe) => unsubscribe());
-    listUnsubscribes = [];
+function formatId(n: number): string {
+    return `u${String(n).padStart(4, "0")}`;
 }
 
 function mountList() {
-    teardownList();
+    teardownActiveFeed();
 
-    const profiles = new Map<string, EntityProfile>();
+    view.innerHTML = renderListShell();
 
-    let rerenderScheduled = false;
+    let cursor = 0;
+    const nextIds = (): string[] | null => {
+        if (cursor >= TOTAL_ENTITY_COUNT) return null;
 
-    const rerender = () => {
-        if (rerenderScheduled) return;
-        rerenderScheduled = true;
+        const end = Math.min(cursor + LIST_BATCH_SIZE, TOTAL_ENTITY_COUNT);
+        const ids = Array.from({ length: end - cursor }, (_, i) => formatId(cursor + i));
+        cursor = end;
 
-        requestAnimationFrame(() => {
-            rerenderScheduled = false;
-
-            // profiles は下の forEach で全IDに対し store.get(id) の返り値を
-            // set 済みのため、この時点で undefined になることはない。
-            const ordered = DEMO_IDS.map((id) => profiles.get(id)!);
-
-            view.innerHTML = renderListView(ordered);
-            attachListHandlers();
-        });
+        return ids;
     };
 
-    // store.get() は内部で 10ms 毎にキューをまとめて一括解決するため、
-    // ループでそのまま呼んでよい(手動バッチ処理は不要)。
-    DEMO_IDS.forEach((id) => {
-        profiles.set(id, store.get(id));
+    const container = view.querySelector<HTMLElement>("#feed-container")!;
+    const sentinel = view.querySelector<HTMLElement>("#feed-sentinel")!;
+    const loadedCountEl = view.querySelector<HTMLElement>("#list-loaded-count");
 
-        const unsubscribe = store.subscribe(id, (updated: EntityProfile) => {
-            profiles.set(id, updated);
-            rerender();
-        });
-
-        listUnsubscribes.push(unsubscribe);
+    activeFeed = createFeed({
+        container,
+        sentinel,
+        windowSize: FEED_WINDOW_SIZE,
+        nextIds,
+        renderItem: renderListRow,
+        onLoadedCountChange: (total) => {
+            if (loadedCountEl) loadedCountEl.textContent = String(total);
+        },
     });
 
-    rerender();
+    attachListHandlers(container);
 }
 
-function attachListHandlers() {
-    document.querySelector<HTMLButtonElement>("#clear-cache-btn")?.addEventListener("click", async () => {
+function attachListHandlers(container: HTMLElement) {
+    view.querySelector<HTMLButtonElement>("#clear-cache-btn")?.addEventListener("click", async () => {
         await store.clear();
         // clear()はメモリキャッシュ・リスナー・resolve状態を全てクリアするため、
-        // 購読も含めて一覧を再マウントし直す。
+        // フィードごと再マウントし直す。
         mountList();
     });
 
-    document.querySelectorAll<HTMLButtonElement>(".user-row").forEach((row) => {
-        row.addEventListener("click", () => {
-            const id = row.dataset.id;
-            if (id) {
-                location.hash = `#/profile/${encodeURIComponent(id)}`;
-            }
-        });
+    // 項目は無限フィードによって動的に追加され続けるため、行単位ではなく
+    // コンテナへのイベント委譲でクリックを拾う。
+    container.addEventListener("click", (event) => {
+        const row = (event.target as HTMLElement).closest<HTMLElement>(".user-row");
+        const id = row?.dataset.id;
+        if (id) {
+            location.hash = `#/profile/${encodeURIComponent(id)}`;
+        }
+    });
+}
+
+/* -------------------------------------------------------------------- */
+/* 画面3: ランダムタイムライン                                             */
+/* -------------------------------------------------------------------- */
+
+const HOT_POOL: string[] = Array.from({ length: HOT_POOL_SIZE }, randomId);
+
+function randomId(): string {
+    return formatId(Math.floor(Math.random() * TOTAL_ENTITY_COUNT));
+}
+
+function mountTimeline() {
+    teardownActiveFeed();
+
+    view.innerHTML = renderTimelineShell();
+
+    const nextIds = (): string[] =>
+        Array.from({ length: TIMELINE_BATCH_SIZE }, () =>
+            Math.random() < HOT_POOL_RATIO
+                ? HOT_POOL[Math.floor(Math.random() * HOT_POOL.length)]
+                : randomId()
+        );
+
+    const container = view.querySelector<HTMLElement>("#feed-container")!;
+    const sentinel = view.querySelector<HTMLElement>("#feed-sentinel")!;
+
+    activeFeed = createFeed({
+        container,
+        sentinel,
+        windowSize: FEED_WINDOW_SIZE,
+        nextIds,
+        renderItem: renderTimelineCard,
+    });
+
+    attachTimelineHandlers(container);
+}
+
+function attachTimelineHandlers(container: HTMLElement) {
+    container.addEventListener("click", (event) => {
+        const card = (event.target as HTMLElement).closest<HTMLElement>(".timeline-card");
+        const id = card?.dataset.id;
+        if (id) {
+            location.hash = `#/profile/${encodeURIComponent(id)}`;
+        }
     });
 }
 
@@ -89,13 +183,13 @@ function attachListHandlers() {
 /* -------------------------------------------------------------------- */
 
 async function mountProfile(id: string) {
-    teardownList();
+    teardownActiveFeed();
 
     view.innerHTML = renderProfileView(null, true);
     attachBackHandler();
 
     try {
-        // 一覧(get: キャッシュ優先)とは別の仕組みとして、
+        // 一覧・タイムライン(get: キャッシュ優先)とは別の仕組みとして、
         // 常に最新を取りに行く getLatest() を使う。
         const profile = await store.getLatest(id);
         renderProfile(profile);
@@ -268,13 +362,19 @@ function setMessage(el: Element | null, text: string, colorClass: string) {
 /* -------------------------------------------------------------------- */
 
 function router() {
-    const match = location.hash.match(/^#\/profile\/(.+)$/);
+    const profileMatch = location.hash.match(/^#\/profile\/(.+)$/);
 
-    if (match) {
-        mountProfile(decodeURIComponent(match[1]));
-    } else {
-        mountList();
+    if (profileMatch) {
+        mountProfile(decodeURIComponent(profileMatch[1]));
+        return;
     }
+
+    if (location.hash === "#/timeline") {
+        mountTimeline();
+        return;
+    }
+
+    mountList();
 }
 
 window.addEventListener("hashchange", router);

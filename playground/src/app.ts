@@ -15,14 +15,55 @@ export interface EntityProfile {
     metadata?: unknown;
 }
 
+// デモ環境用ID空間: u0000 〜 u4999(一覧・タイムライン共通)
+export const TOTAL_ENTITY_COUNT = 5000;
+
 /**
- * アプリ全体の外枠(#view コンテナ)。
+ * アプリ全体の外枠(#view コンテナ + 常設の統計パネル)。
  * main.ts はこの中の #view に各画面を差し込む。
+ * 統計パネルは画面遷移をまたいで永続する(一覧・タイムラインが
+ * 同じキャッシュ/統計を共有していることを示すため)。
  */
 export function renderShell(): string {
     return `
         <div class="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
-            <main id="view" class="mx-auto max-w-3xl px-6 py-8"></main>
+            <main id="view" class="mx-auto max-w-3xl px-6 py-8 pb-28"></main>
+            ${renderStatsPanel()}
+        </div>
+    `;
+}
+
+function renderStatsPanel(): string {
+    return `
+        <div class="fixed bottom-4 right-4 z-10 w-64 rounded-lg border border-zinc-800 bg-zinc-900/95 px-4 py-3 shadow-lg backdrop-blur">
+            <div class="mb-2 flex items-center justify-between">
+                <span class="font-mono text-[10px] uppercase tracking-wide text-zinc-500">network stats</span>
+                <button id="stats-reset-btn" type="button" class="font-mono text-[10px] text-zinc-600 hover:text-zinc-300">
+                    reset
+                </button>
+            </div>
+            <dl class="space-y-1 font-mono text-xs">
+                <div class="flex items-center justify-between">
+                    <dt class="text-zinc-500">requested</dt>
+                    <dd id="stats-requested" class="text-zinc-100">0</dd>
+                </div>
+                <div class="flex items-center justify-between">
+                    <dt class="text-zinc-500">sent to server</dt>
+                    <dd id="stats-sent" class="text-zinc-100">0</dd>
+                </div>
+                <div class="flex items-center justify-between">
+                    <dt class="text-zinc-500">version-matched</dt>
+                    <dd id="stats-unchanged" class="text-zinc-100">0</dd>
+                </div>
+                <div class="flex items-center justify-between">
+                    <dt class="text-zinc-500">cache hit rate</dt>
+                    <dd id="stats-cache-hit-rate" class="text-emerald-400">—</dd>
+                </div>
+                <div class="flex items-center justify-between border-t border-zinc-800 pt-1 text-zinc-600">
+                    <dt>network calls</dt>
+                    <dd id="stats-network">0</dd>
+                </div>
+            </dl>
         </div>
     `;
 }
@@ -31,33 +72,44 @@ export function renderShell(): string {
 /* 画面1: ユーザー一覧                                                    */
 /* -------------------------------------------------------------------- */
 
-export function renderListView(profiles: EntityProfile[]): string {
+export function renderListShell(): string {
     return `
         <div class="mb-6 flex items-end justify-between gap-4">
             <div>
                 <h2 class="text-xl font-semibold text-zinc-100">プロフィール一覧</h2>
-                <p class="mt-1 font-mono text-xs text-zinc-500">${profiles.length} entities</p>
+                <p class="mt-1 font-mono text-xs text-zinc-500">
+                    <span id="list-loaded-count">0</span> / ${TOTAL_ENTITY_COUNT} entities
+                </p>
             </div>
 
-            <button
-                id="clear-cache-btn"
-                type="button"
-                class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-rose-800 hover:text-rose-300"
-            >
-                キャッシュ削除
-            </button>
+            <div class="flex items-center gap-3">
+                <a
+                    href="#/timeline"
+                    class="font-mono text-xs text-indigo-400 transition-colors hover:text-indigo-300"
+                >
+                    → ランダムタイムライン
+                </a>
+
+                <button
+                    id="clear-cache-btn"
+                    type="button"
+                    class="rounded-md border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:border-rose-800 hover:text-rose-300"
+                >
+                    キャッシュ削除
+                </button>
+            </div>
         </div>
 
         <div
-            id="user-list"
+            id="feed-container"
             class="divide-y divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800"
-        >
-            ${profiles.map(renderRow).join("")}
-        </div>
+        ></div>
+
+        <div id="feed-sentinel" class="h-1"></div>
     `;
 }
 
-function renderRow(profile: EntityProfile): string {
+export function renderListRow(profile: EntityProfile): string {
     const isDeleted = profile.status === "deleted";
 
     return `
@@ -86,6 +138,60 @@ function renderRow(profile: EntityProfile): string {
                     clip-rule="evenodd"
                 />
             </svg>
+        </button>
+    `;
+}
+
+/* -------------------------------------------------------------------- */
+/* 画面3: ランダムタイムライン                                             */
+/* -------------------------------------------------------------------- */
+
+export function renderTimelineShell(): string {
+    return `
+        <div class="mb-6 flex items-end justify-between gap-4">
+            <div>
+                <h2 class="text-xl font-semibold text-zinc-100">ランダムタイムライン</h2>
+                <p class="mt-1 font-mono text-xs text-zinc-500">スクロールすると次々読み込まれます</p>
+            </div>
+
+            <a href="#/" class="font-mono text-xs text-indigo-400 transition-colors hover:text-indigo-300">
+                ← 一覧に戻る
+            </a>
+        </div>
+
+        <div id="feed-container" class="space-y-3"></div>
+
+        <div id="feed-sentinel" class="h-1"></div>
+    `;
+}
+
+export function renderTimelineCard(profile: EntityProfile): string {
+    const isDeleted = profile.status === "deleted";
+
+    return `
+        <button
+            type="button"
+            data-id="${escapeAttr(profile.id)}"
+            class="timeline-card flex w-full items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 text-left transition-colors hover:bg-zinc-900 ${
+                isDeleted ? "opacity-50" : ""
+            }"
+        >
+            ${renderAvatar(profile, "h-12 w-12 text-base")}
+
+            <span class="min-w-0 flex-1">
+                <span class="flex items-center gap-2">
+                    <span class="truncate text-sm font-medium text-zinc-100">
+                        ${escapeHtml(profile.name ?? "")}
+                    </span>
+                    ${statusBadge(profile.status)}
+                </span>
+                <span class="block truncate font-mono text-xs text-zinc-500">${escapeHtml(profile.id)}</span>
+                ${
+                    profile.bio
+                        ? `<span class="mt-1 block line-clamp-2 text-xs text-zinc-400">${escapeHtml(profile.bio)}</span>`
+                        : ""
+                }
+            </span>
         </button>
     `;
 }
