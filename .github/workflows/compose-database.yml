@@ -1,0 +1,57 @@
+name: Compose database startup
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: entitystore-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start with an empty database and create a profile
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose up --build -d
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:3000/health; then break; fi
+            sleep 2
+          done
+          status=$(curl --silent --output /tmp/profile.json --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' -d '{"id":"compose-smoke"}' http://localhost:3000/profiles)
+          test "$status" = 201
+          docker compose run --rm migrate npm run db:status
+      - name: Restart without deleting the volume
+        run: |
+          docker compose down
+          docker compose up -d
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:3000/profiles/compose-smoke > /tmp/persisted.json; then break; fi
+            sleep 2
+          done
+          node -e 'const p = require("/tmp/persisted.json"); if (p.id !== "compose-smoke") process.exit(1)'
+      - name: Refuse API startup after migration failure
+        run: |
+          docker compose down
+          cat > /tmp/migration-failure.yml <<'YAML'
+          services:
+            migrate:
+              command: ["node", "-e", "process.exit(1)"]
+          YAML
+          if docker compose -f docker-compose.yml -f /tmp/migration-failure.yml up -d; then
+            echo 'Expected migration failure to prevent startup' >&2
+            exit 1
+          fi
+          test -z "$(docker compose ps --status running -q profile)"
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$(docker compose ps -a -q migrate)")" = 1
+      - name: Logs
+        if: always()
+        run: docker compose logs --no-color
+      - name: Remove isolated CI resources
+        if: always()
+        run: docker compose down -v --remove-orphans
