@@ -1,61 +1,34 @@
-import { FastifyInstance } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { profileRepository } from "../../repositories/profile.repository.js";
-import { UpdateProfileRequest, ProfileParams } from "../../types/profile.js";
-import { validateProfileFields } from "../../validators/profile.js";
+import { ProfileWriteError } from "../../repositories/profile.errors.js";
+import { PROFILE_LIMITS, type UpdateProfileRequest, type ProfileParams } from "../../types/profile.js";
 
-export async function updateProfileRoute(
-    app: FastifyInstance
-) {
-    app.patch<{
-        Params: ProfileParams; 
-        Body: UpdateProfileRequest;
-    }>("/profiles/:id", async (request, reply) => {
+export async function updateProfileRoute(app: FastifyInstance) {
+    app.patch<{ Params: ProfileParams; Body: UpdateProfileRequest }>("/profiles/:id", {
+        schema: { body: {
+            type: "object", required: ["version"],
+            properties: {
+                version: { type: "integer", minimum: 1, maximum: 2147483647 },
+                name: { type: "string", maxLength: PROFILE_LIMITS.NAME_MAX_LENGTH },
+                bio: { type: ["string", "null"], maxLength: PROFILE_LIMITS.BIO_MAX_LENGTH },
+                iconUrl: { type: ["string", "null"], maxLength: PROFILE_LIMITS.ICON_URL_MAX_LENGTH },
+            },
+        } },
+    }, async (request, reply) => {
         const { id } = request.params;
         const body = request.body;
-
-        const validationError = validateProfileFields({
-                name: body.name,
-                bio: body.bio,
-                iconUrl: body.iconUrl,
+        try {
+            return await profileRepository.update(id, body.version, {
+                name: body.name, bio: body.bio, iconUrl: body.iconUrl, metadata: body.metadata,
             });
-
-        if (validationError) {
-            return reply.code(400).send({
-                message: validationError,
-            });
-        }
-
-        const profile = await profileRepository.findById(id);
-
-        if (!profile) {
-            return reply.status(404).send({
-                message: "Profile not found",
-            });
-        }
-        
-        if(profile.status === "deleted"){
-            return reply.status(410).send({
-                message: "Profile deleted"
-            });
-        }
-
-        if (profile.version !== body.version) {
-            return reply.status(409).send({
-                message: "Version conflict",
-                currentVersion: profile.version,
-            });
-        }
-
-        const updated = await profileRepository.update(
-            id,
-            {
-                name: body.name,
-                bio: body.bio,
-                iconUrl: body.iconUrl,
-                metadata: body.metadata,
+        } catch (error) {
+            if (error instanceof ProfileWriteError) {
+                return reply.code(error.statusCode).send({
+                    message: error.message,
+                    ...(error.currentVersion === undefined ? {} : { currentVersion: error.currentVersion }),
+                });
             }
-        );
-
-        return updated;
+            throw error;
+        }
     });
 }

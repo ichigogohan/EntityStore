@@ -1,112 +1,47 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import Fastify, { FastifyInstance } from "fastify";
-
-// create.ts は profileRepository (src/repositories/profile.repository.ts) 経由になったため、
-// prismaではなく profileRepository をモックする。
-vi.mock("../src/repositories/profile.repository.js", () => ({
-    profileRepository: {
-        findById: vi.fn(),
-        create: vi.fn(),
-    },
-}));
-
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import Fastify, { type FastifyInstance } from "fastify";
+vi.mock("../src/repositories/profile.repository.js", () => ({ profileRepository: { create: vi.fn() } }));
 import { profileRepository } from "../src/repositories/profile.repository.js";
+import { ProfileWriteError } from "../src/repositories/profile.errors.js";
 import { createProfileRoute } from "../src/routes/profiles/create.js";
 
-describe("POST /profiles (createProfileRoute)", () => {
-    let app: FastifyInstance;
+let app: FastifyInstance;
+beforeEach(async () => {
+    vi.resetAllMocks();
+    vi.stubEnv("ENABLE_PROFILE_CREATE", "true");
+    app = Fastify();
+    await app.register(createProfileRoute);
+});
+afterEach(async () => { await app.close(); vi.unstubAllEnvs(); });
 
-    beforeEach(async () => {
-        vi.clearAllMocks();
-        app = Fastify();
-        await app.register(createProfileRoute);
-        await app.ready();
-    });
-
-    it("既存プロフィールが存在しない場合、201でプロフィールを新規作成する", async () => {
-        (profileRepository.findById as any).mockResolvedValue(null);
-        (profileRepository.create as any).mockResolvedValue({
-            id: "user-1",
-            name: "New User",
-            status: "active",
-            version: 0,
-        });
-
-        const res = await app.inject({
-            method: "POST",
-            url: "/profiles",
-            payload: { id: "user-1" },
-        });
-
+describe("POST /profiles", () => {
+    it("creates with the fixed initial name and ignores extra fields", async () => {
+        vi.mocked(profileRepository.create).mockResolvedValue({ id: "u1", name: "New User" } as any);
+        const res = await app.inject({ method: "POST", url: "/profiles", payload: { id: "u1", name: "Ignored" } });
         expect(res.statusCode).toBe(201);
-        expect(res.json()).toEqual({
-            id: "user-1",
-            name: "New User",
-            status: "active",
-            version: 0,
-        });
+        expect(res.json()).toEqual({ id: "u1", name: "New User" });
+        expect(profileRepository.create).toHaveBeenCalledWith({ id: "u1", name: "New User" });
     });
-
-    it("profileRepository.create を id/name の固定値で呼び出す（statusはrepository側の責務）", async () => {
-        (profileRepository.findById as any).mockResolvedValue(null);
-        (profileRepository.create as any).mockResolvedValue({});
-
-        await app.inject({
-            method: "POST",
-            url: "/profiles",
-            payload: { id: "user-1" },
-        });
-
-        expect(profileRepository.create).toHaveBeenCalledWith({
-            id: "user-1",
-            name: "New User",
-        });
-    });
-
-    it("profileRepository.findById を id の文字列で呼び出す", async () => {
-        (profileRepository.findById as any).mockResolvedValue(null);
-        (profileRepository.create as any).mockResolvedValue({});
-
-        await app.inject({
-            method: "POST",
-            url: "/profiles",
-            payload: { id: "user-42" },
-        });
-
-        expect(profileRepository.findById).toHaveBeenCalledWith("user-42");
-    });
-
-    it("既に同じidのプロフィールが存在する場合、409を返し create は呼ばれない", async () => {
-        (profileRepository.findById as any).mockResolvedValue({
-            id: "user-1",
-            name: "Existing",
-            status: "active",
-            version: 0,
-        });
-
-        const res = await app.inject({
-            method: "POST",
-            url: "/profiles",
-            payload: { id: "user-1" },
-        });
-
+    it("maps a duplicate ID to 409", async () => {
+        vi.mocked(profileRepository.create).mockRejectedValue(new ProfileWriteError(409, "Profile already exists"));
+        const res = await app.inject({ method: "POST", url: "/profiles", payload: { id: "u1" } });
         expect(res.statusCode).toBe(409);
         expect(res.json()).toEqual({ message: "Profile already exists" });
+    });
+    it.each(["false", "", "TRUE"])("disables creation when the flag is %s", async flag => {
+        vi.stubEnv("ENABLE_PROFILE_CREATE", flag);
+        const res = await app.inject({ method: "POST", url: "/profiles", payload: {} });
+        expect(res.statusCode).toBe(403);
         expect(profileRepository.create).not.toHaveBeenCalled();
     });
-
-    it("リクエストで別のnameを送っても無視され、常に'New User'で作成される（現在の仕様の確認）", async () => {
-        (profileRepository.findById as any).mockResolvedValue(null);
-        (profileRepository.create as any).mockResolvedValue({});
-
-        await app.inject({
-            method: "POST",
-            url: "/profiles",
-            payload: { id: "user-1", name: "Ignored Name" } as any,
-        });
-
-        expect(profileRepository.create).toHaveBeenCalledWith(
-            expect.objectContaining({ name: "New User" })
-        );
+    it.each([{}, { id: "" }, { id: null }])("rejects invalid IDs: %j", async payload => {
+        const res = await app.inject({ method: "POST", url: "/profiles", payload });
+        expect(res.statusCode).toBe(400);
+        expect(profileRepository.create).not.toHaveBeenCalled();
+    });
+    it("does not hide a database outage", async () => {
+        vi.mocked(profileRepository.create).mockRejectedValue(new Error("DB unavailable"));
+        const res = await app.inject({ method: "POST", url: "/profiles", payload: { id: "u1" } });
+        expect(res.statusCode).toBe(500);
     });
 });
