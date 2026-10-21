@@ -45,7 +45,51 @@
 
 ## 起動方法
 
-```bash
-# コンテナの立ち上げ
-docker compose up -d
+Docker Compose v2を使用します。
 
+```bash
+cp .env.example .env
+# .envのPOSTGRES_PASSWORDなどを設定してから起動
+docker compose up --build -d
+```
+
+PostgreSQLのhealthcheck成功後、`migrate`サービスが`prisma migrate deploy`を実行します。
+正常終了した場合だけ`profile`サービスが起動します。`prisma generate`はビルド時の
+クライアント生成であり、DBのテーブル作成は`migrate`が担当します。
+
+### 状態確認・手動操作
+
+```bash
+docker compose logs --tail=100 migrate profile postgres redis
+docker compose run --rm migrate npm run db:status
+docker compose run --rm migrate npm run db:migrate
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+docker compose exec redis redis-cli ping
+```
+
+PostgreSQLとRedisのホスト向けポートは公開していません。内部接続はそれぞれ
+`postgres:5432`と`redis:6379`です。RedisはこのComposeの内部ネットワークで
+パスワードなしで使用します。Compose外で起動する場合は接続先を別途設定してください。
+
+### 既存DBへの導入
+
+1. 既存DBのバックアップを取得します（例は下記）。
+2. マイグレーションの適用状況を確認し、履歴と実スキーマに不一致がないことを確認します。
+3. `docker compose up --build -d`で起動します。適用失敗時はログを確認し、修正後に再実行します。
+
+```bash
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > profile-backup.sql
+```
+
+既に`Profile`テーブルがあり履歴がない場合は、テーブル定義・インデックスが
+`prisma/migrations/20260708070009_init/migration.sql`と一致することを確認してから、
+次のコマンドで初期マイグレーションを適用済みとして登録します。不一致なら実行せず、
+先に差分を調査してください。
+
+```bash
+docker compose run --rm migrate npx prisma migrate resolve --applied 20260708070009_init
+```
+
+データを保持するため、`prisma migrate reset`や`docker compose down -v`は使用しません。
+既存ボリュームでは`.env`の`POSTGRES_USER`・`POSTGRES_PASSWORD`・`POSTGRES_DB`を変更しても、
+DB内の認証情報・データベースは自動変更されません。
