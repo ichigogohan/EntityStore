@@ -1,168 +1,39 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import Fastify, { FastifyInstance } from "fastify";
-
-// update.ts は profileRepository 経由になったため、prismaではなく profileRepository をモックする。
-vi.mock("../src/repositories/profile.repository.js", () => ({
-    profileRepository: {
-        findById: vi.fn(),
-        update: vi.fn(),
-    },
-}));
-
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import Fastify, { type FastifyInstance } from "fastify";
+vi.mock("../src/repositories/profile.repository.js", () => ({ profileRepository: { update: vi.fn() } }));
 import { profileRepository } from "../src/repositories/profile.repository.js";
+import { ProfileWriteError } from "../src/repositories/profile.errors.js";
 import { updateProfileRoute } from "../src/routes/profiles/update.js";
+let app: FastifyInstance;
+beforeEach(async () => { vi.resetAllMocks(); app = Fastify(); await app.register(updateProfileRoute); });
+afterEach(async () => { await app.close(); });
 
-// 注: baseProfile.status は「既存プロフィール（DB/キャッシュ上のレコード）」側のフィールドで、
-// 削除済みかどうかの判定に実際に使われます。
-// リクエストボディ（UpdateProfileRequest）には status は存在しません。
-const baseProfile = {
-    id: "user-1",
-    name: "Old Name",
-    bio: "old bio",
-    iconUrl: null,
-    metadata: null,
-    status: "active",
-    version: 3,
-};
-
-describe("PATCH /profiles/:id (updateProfileRoute)", () => {
-    let app: FastifyInstance;
-
-    beforeEach(async () => {
-        vi.clearAllMocks();
-        app = Fastify();
-        await app.register(updateProfileRoute);
-        await app.ready();
-    });
-
-    it("プロフィールが存在しない場合、404を返す", async () => {
-        (profileRepository.findById as any).mockResolvedValue(null);
-
-        const res = await app.inject({
-            method: "PATCH",
-            url: "/profiles/user-1",
-            payload: { name: "New Name", version: 3 },
-        });
-
-        expect(res.statusCode).toBe(404);
-        expect(res.json()).toEqual({ message: "Profile not found" });
-        expect(profileRepository.update).not.toHaveBeenCalled();
-    });
-
-    it("プロフィールが削除済み(status: deleted)の場合、410を返す", async () => {
-        (profileRepository.findById as any).mockResolvedValue({
-            ...baseProfile,
-            status: "deleted",
-        });
-
-        const res = await app.inject({
-            method: "PATCH",
-            url: "/profiles/user-1",
-            payload: { name: "New Name", version: 3 },
-        });
-
-        expect(res.statusCode).toBe(410);
-        expect(res.json()).toEqual({ message: "Profile deleted" });
-        expect(profileRepository.update).not.toHaveBeenCalled();
-    });
-
-    it("削除済みかつversionが不一致でも、410（削除チェック優先）が返る", async () => {
-        (profileRepository.findById as any).mockResolvedValue({
-            ...baseProfile,
-            status: "deleted",
-            version: 3,
-        });
-
-        const res = await app.inject({
-            method: "PATCH",
-            url: "/profiles/user-1",
-            payload: { name: "New Name", version: 999 },
-        });
-
-        expect(res.statusCode).toBe(410);
-    });
-
-    it("versionが一致しない場合、409とcurrentVersionを返す", async () => {
-        (profileRepository.findById as any).mockResolvedValue(baseProfile); // version: 3
-
-        const res = await app.inject({
-            method: "PATCH",
-            url: "/profiles/user-1",
-            payload: { name: "New Name", version: 2 },
-        });
-
-        expect(res.statusCode).toBe(409);
-        expect(res.json()).toEqual({
-            message: "Version conflict",
-            currentVersion: 3,
-        });
-        expect(profileRepository.update).not.toHaveBeenCalled();
-    });
-
-    it("versionが一致する場合、更新して結果を返す（デフォルト200）", async () => {
-        (profileRepository.findById as any).mockResolvedValue(baseProfile);
-        (profileRepository.update as any).mockResolvedValue({
-            ...baseProfile,
-            name: "New Name",
-            bio: "new bio",
-            version: 4,
-        });
-
-        const res = await app.inject({
-            method: "PATCH",
-            url: "/profiles/user-1",
-            payload: {
-                name: "New Name",
-                bio: "new bio",
-                iconUrl: "https://example.com/icon.png",
-                metadata: { theme: "dark" },
-                version: 3,
-            },
-        });
-
+describe("PATCH /profiles/:id", () => {
+    it("passes the expected version separately and ignores status", async () => {
+        vi.mocked(profileRepository.update).mockResolvedValue({ id: "u1", name: "Alice", version: 4 } as any);
+        const res = await app.inject({ method: "PATCH", url: "/profiles/u1", payload: {
+            version: 3, name: "Alice", bio: null, iconUrl: null, metadata: { a: 1 }, status: "deleted",
+        } });
         expect(res.statusCode).toBe(200);
-        expect(res.json()).toMatchObject({ name: "New Name", version: 4 });
-    });
-
-    it("profileRepository.update を id と name/bio/iconUrl/metadata のみで呼び出す（versionのincrementはrepository側の責務）", async () => {
-        (profileRepository.findById as any).mockResolvedValue(baseProfile);
-        (profileRepository.update as any).mockResolvedValue({});
-
-        await app.inject({
-            method: "PATCH",
-            url: "/profiles/user-1",
-            payload: {
-                name: "New Name",
-                bio: null,
-                iconUrl: null,
-                metadata: { theme: "dark" },
-                version: 3,
-            },
-        });
-
-        expect(profileRepository.update).toHaveBeenCalledWith("user-1", {
-            name: "New Name",
-            bio: null,
-            iconUrl: null,
-            metadata: { theme: "dark" },
+        expect(res.json()).toMatchObject({ name: "Alice", version: 4 });
+        expect(profileRepository.update).toHaveBeenCalledWith("u1", 3, {
+            name: "Alice", bio: null, iconUrl: null, metadata: { a: 1 },
         });
     });
-
-    it("リクエストにstatusフィールドを含めても無視される（型に存在しない余分なフィールドの安全性確認）", async () => {
-        (profileRepository.findById as any).mockResolvedValue(baseProfile);
-        (profileRepository.update as any).mockResolvedValue({});
-
-        await app.inject({
-            method: "PATCH",
-            url: "/profiles/user-1",
-            payload: {
-                name: "New Name",
-                version: 3,
-                status: "unknown",
-            } as any,
-        });
-
-        const calledData = (profileRepository.update as any).mock.calls[0][1];
-        expect(calledData).not.toHaveProperty("status");
+    it.each([
+        [404, "Profile not found", undefined], [410, "Profile deleted", undefined], [409, "Version conflict", 4],
+    ] as const)("preserves the %i response", async (code, message, currentVersion) => {
+        vi.mocked(profileRepository.update).mockRejectedValue(new ProfileWriteError(code, message, currentVersion));
+        const res = await app.inject({ method: "PATCH", url: "/profiles/u1", payload: { version: 3 } });
+        expect(res.statusCode).toBe(code);
+        expect(res.json()).toEqual({ message, ...(currentVersion ? { currentVersion } : {}) });
+    });
+    it.each([{}, { version: 0 }, { version: -1 }, { version: 1.5 }, { version: null },
+        { version: 2147483648 }, { version: 1, name: "x".repeat(65) },
+        { version: 1, bio: "x".repeat(513) }, { version: 1, iconUrl: "x".repeat(513) },
+    ])("rejects invalid updates before DB access: %j", async payload => {
+        const res = await app.inject({ method: "PATCH", url: "/profiles/u1", payload });
+        expect(res.statusCode).toBe(400);
+        expect(profileRepository.update).not.toHaveBeenCalled();
     });
 });

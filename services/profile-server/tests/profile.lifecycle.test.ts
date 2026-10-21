@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Fastify, { FastifyInstance } from "fastify";
 
 /**
@@ -37,19 +37,23 @@ vi.mock("../src/repositories/profile.repository.js", () => ({
             return ids.map(id => store.get(id)).filter(Boolean);
         }),
         create: vi.fn(async (data: any) => {
+            if (store.has(data.id)) throw new ProfileWriteError(409, "Profile already exists");
             const record = {
                 bio: null,
                 iconUrl: null,
                 metadata: null,
-                version: 0,
+                version: 1,
                 status: "active",
                 ...data,
             };
             store.set(data.id, record);
             return record;
         }),
-        update: vi.fn(async (id: string, data: any) => {
+        update: vi.fn(async (id: string, version: number, data: any) => {
             const current = store.get(id);
+            if (!current) throw new ProfileWriteError(404, "Profile not found");
+            if (current.status === "deleted") throw new ProfileWriteError(410, "Profile deleted");
+            if (current.version !== version) throw new ProfileWriteError(409, "Version conflict", current.version);
             const next = {
                 ...current,
                 ...data,
@@ -60,6 +64,8 @@ vi.mock("../src/repositories/profile.repository.js", () => ({
         }),
         delete: vi.fn(async (id: string) => {
             const current = store.get(id);
+            if (!current) throw new ProfileWriteError(404, "Profile not found");
+            if (current.status === "deleted") return null;
             const next = {
                 ...current,
                 status: "deleted",
@@ -70,6 +76,8 @@ vi.mock("../src/repositories/profile.repository.js", () => ({
         }),
     },
 }));
+
+import { ProfileWriteError } from "../src/repositories/profile.errors.js";
 
 import { createProfileRoute } from "../src/routes/profiles/create.js";
 import { updateProfileRoute } from "../src/routes/profiles/update.js";
@@ -82,6 +90,7 @@ describe("プロフィールのライフサイクル（create → update → del
     beforeEach(async () => {
         store.clear();
         vi.clearAllMocks();
+        vi.stubEnv("ENABLE_PROFILE_CREATE", "true");
         app = Fastify();
         await app.register(createProfileRoute);
         await app.register(updateProfileRoute);
@@ -89,6 +98,8 @@ describe("プロフィールのライフサイクル（create → update → del
         await app.register(getProfileRoute);
         await app.ready();
     });
+
+    afterEach(async () => { await app.close(); vi.unstubAllEnvs(); });
 
     async function getProfile(id: string) {
         return app.inject({ method: "GET", url: `/profiles/${id}` });
@@ -113,7 +124,7 @@ describe("プロフィールのライフサイクル（create → update → del
             id: "user-1",
             name: "New User",
             status: "active",
-            version: 0,
+            version: 1,
         });
 
         // 2. 同じidで再作成しようとすると409
@@ -124,11 +135,11 @@ describe("プロフィールのライフサイクル（create → update → del
         });
         expect(dupRes.statusCode).toBe(409);
 
-        // 3. 正しいversionで更新 → version 0→1
+        // 3. 正しいversionで更新 → version 1→2
         const updateRes1 = await app.inject({
             method: "PATCH",
             url: "/profiles/user-1",
-            payload: { name: "Alice", bio: "Hello world", version: 0 },
+            payload: { name: "Alice", bio: "Hello world", version: 1 },
         });
         expect(updateRes1.statusCode).toBe(200);
 
@@ -136,25 +147,25 @@ describe("プロフィールのライフサイクル（create → update → del
         expect(afterUpdate1.json()).toMatchObject({
             name: "Alice",
             bio: "Hello world",
-            version: 1,
+            version: 2,
         });
 
-        // 4. 古いversion(0)で更新しようとすると409、currentVersionは1
+        // 4. 古いversion(1)で更新しようとすると409、currentVersionは2
         const staleUpdateRes = await app.inject({
             method: "PATCH",
             url: "/profiles/user-1",
-            payload: { name: "Bob", version: 0 },
+            payload: { name: "Bob", version: 1 },
         });
         expect(staleUpdateRes.statusCode).toBe(409);
         expect(staleUpdateRes.json()).toEqual({
             message: "Version conflict",
-            currentVersion: 1,
+            currentVersion: 2,
         });
 
         const afterConflict = await getProfile("user-1");
-        expect(afterConflict.json()).toMatchObject({ name: "Alice", version: 1 });
+        expect(afterConflict.json()).toMatchObject({ name: "Alice", version: 2 });
 
-        // 5. 正しいversion(1)で削除 → status: deleted, version 1→2
+        // 5. 削除 → status: deleted, version 2→3
         const deleteRes1 = await app.inject({
             method: "DELETE",
             url: "/profiles/user-1",
@@ -163,7 +174,7 @@ describe("プロフィールのライフサイクル（create → update → del
 
         const afterDelete1 = await getProfile("user-1");
         expect(afterDelete1.statusCode).toBe(200);
-        expect(afterDelete1.json()).toMatchObject({ status: "deleted", version: 2 });
+        expect(afterDelete1.json()).toMatchObject({ status: "deleted", version: 3 });
 
         // 6. 削除済みプロフィールを再度削除 → 204、versionは変化しない（冪等）
         const deleteRes2 = await app.inject({
@@ -173,13 +184,13 @@ describe("プロフィールのライフサイクル（create → update → del
         expect(deleteRes2.statusCode).toBe(204);
 
         const afterDelete2 = await getProfile("user-1");
-        expect(afterDelete2.json()).toMatchObject({ version: 2 });
+        expect(afterDelete2.json()).toMatchObject({ version: 3 });
 
         // 7. 削除済みプロフィールを更新しようとすると410
         const updateAfterDeleteRes = await app.inject({
             method: "PATCH",
             url: "/profiles/user-1",
-            payload: { name: "Charlie", version: 2 },
+            payload: { name: "Charlie", version: 3 },
         });
         expect(updateAfterDeleteRes.statusCode).toBe(410);
         expect(updateAfterDeleteRes.json()).toEqual({ message: "Profile deleted" });
@@ -188,7 +199,7 @@ describe("プロフィールのライフサイクル（create → update → del
         expect(finalState.json()).toMatchObject({
             name: "Alice",
             status: "deleted",
-            version: 2,
+            version: 3,
         });
     });
 
@@ -199,7 +210,7 @@ describe("プロフィールのライフサイクル（create → update → del
         const updateRes = await app.inject({
             method: "PATCH",
             url: "/profiles/ghost",
-            payload: { name: "X", version: 0 },
+            payload: { name: "X", version: 1 },
         });
         expect(updateRes.statusCode).toBe(404);
 

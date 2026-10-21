@@ -1,28 +1,18 @@
-import { FastifyInstance } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { profileRepository } from "../../repositories/profile.repository.js";
+import { ProfileWriteError } from "../../repositories/profile.errors.js";
+import type { ProfileParams } from "../../types/profile.js";
 
-export async function deleteProfileRoute(
-    app: FastifyInstance
-) {
-    app.delete("/profiles/:id", async (request, reply) => {
-        const { id } = request.params as {
-            id: string;
-        };
-
-        const profile = await profileRepository.findById(id);
-
-        if (!profile) {
-            return reply.status(404).send({
-                message: "Profile not found",
-            });
+export async function deleteProfileRoute(app: FastifyInstance) {
+    app.delete<{ Params: ProfileParams }>("/profiles/:id", async (request, reply) => {
+        try {
+            const deleted = await profileRepository.delete(request.params.id);
+            return deleted ? reply.send(deleted) : reply.code(204).send();
+        } catch (error) {
+            if (error instanceof ProfileWriteError) {
+                return reply.code(error.statusCode).send({ message: error.message });
+            }
+            throw error;
         }
-
-        if (profile.status === "deleted") {
-            return reply.status(204).send();
-        }
-
-        const deleted = await profileRepository.delete(id);
-
-        return reply.send(deleted);
     });
 }

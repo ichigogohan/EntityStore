@@ -140,3 +140,11 @@ Entity の情報が更新・削除される際、サーバー側で自動的に�
 * `clientVersion === serverVersion`: 差分なしと判断し、レスポンスの `profiles` から対象 ID を省略する
 
 ```
+
+
+## DB書き込みと競合制御
+
+更新のversion・active状態はRedisではなくPostgreSQLのUPDATE条件で照合します。
+同じversionの同時更新は一方だけ成功し、他方は409と`currentVersion`を返します。
+存在しないIDは404、削除済みの更新は410です。versionはDBの初期値1以上の整数が必須です。
+作成競合は主キー制約で409へ変換し、削除済みの再削除は204でversionを維持します。

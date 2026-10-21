@@ -3,6 +3,8 @@ import { prisma } from "../lib/prisma.js";
 import { redis } from "../lib/redis.js";
 import type { ProfileCreateData, ProfileUpdateData } from "../types/profile.js";
 
+import { isPrismaError, ProfileWriteError } from "./profile.errors.js";
+
 const CACHE_TTL_SECONDS = 60;
 
 export class ProfileRepository {
@@ -41,7 +43,15 @@ export class ProfileRepository {
     }
 
     async create(profile: ProfileCreateData): Promise<Profile> {
-        const created = await prisma.profile.create({ data: { ...profile, status: "active" } });
+        let created: Profile;
+        try {
+            created = await prisma.profile.create({ data: { ...profile, status: "active" } });
+        } catch (error) {
+            if (isPrismaError(error, "P2002")) {
+                throw new ProfileWriteError(409, "Profile already exists");
+            }
+            throw error;
+        }
         await this.cache(created);
         return created;
     }
@@ -85,18 +95,39 @@ export class ProfileRepository {
         return Array.from(results.values());
     }
 
-    async update(id: string, data: ProfileUpdateData): Promise<Profile> {
-        const updated = await prisma.profile.update({
-            where: { id }, data: { ...data, version: { increment: 1 } },
-        });
+    async update(id: string, expectedVersion: number, data: ProfileUpdateData): Promise<Profile> {
+        let updated: Profile;
+        try {
+            // Prisma's extended unique filter makes the version check part of the UPDATE.
+            updated = await prisma.profile.update({
+                where: { id, version: expectedVersion, status: "active" },
+                data: { ...data, version: { increment: 1 } },
+            });
+        } catch (error) {
+            if (!isPrismaError(error, "P2025")) throw error;
+            const current = await prisma.profile.findUnique({ where: { id } });
+            if (!current) throw new ProfileWriteError(404, "Profile not found");
+            if (current.status === "deleted") throw new ProfileWriteError(410, "Profile deleted");
+            throw new ProfileWriteError(409, "Version conflict", current.version);
+        }
         await this.cache(updated);
         return updated;
     }
 
-    async delete(id: string): Promise<Profile> {
-        const deleted = await prisma.profile.update({
-            where: { id }, data: { status: "deleted", version: { increment: 1 } },
-        });
+    async delete(id: string): Promise<Profile | null> {
+        let deleted: Profile;
+        try {
+            deleted = await prisma.profile.update({
+                where: { id, status: "active" },
+                data: { status: "deleted", version: { increment: 1 } },
+            });
+        } catch (error) {
+            if (!isPrismaError(error, "P2025")) throw error;
+            const current = await prisma.profile.findUnique({ where: { id } });
+            if (!current) throw new ProfileWriteError(404, "Profile not found");
+            if (current.status === "deleted") return null;
+            throw new ProfileWriteError(409, "Profile is not active", current.version);
+        }
         await this.cache(deleted);
         return deleted;
     }
